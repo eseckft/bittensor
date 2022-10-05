@@ -861,7 +861,6 @@ class nucleus( torch.nn.Module ):
         # === Define which synapse we want to use ===
         # The synapse defines the task we are sending to the neurons
         # synapses: List[bittensor.synapse]: synapse information
-        # TODO: WORK IN PROGRESS, prototype
         if self.config.neuron.validation_synapse == 'TextCausalLMNext':
             synapses = [(bittensor.synapse.TextCausalLMNext(), textcausallmnext)]
         else: 
@@ -1139,6 +1138,7 @@ def textcausallmnext(uids: torch.Tensor, query_responses: List[List[torch.FloatT
     # Combine base values with synergy approximation to get final Shapley values.
     for s in stats.values():
         if 'base_params_nxt' in s and 'synergy_nxt' in s:
+            print('base_param',s['base_params_nxt'],'synergy', s['synergy_nxt'])
             s['shapley_values_nxt'] = s['base_params_nxt'] + s['synergy_nxt']
 
         if 'losses_nxt' in s:
@@ -1278,35 +1278,43 @@ def shapley_synergy(stats: Dict, synergy: Callable, ext: str, target: torch.Tens
         first_diff[_first] = first['loss' + ext]  # diagonal keeps direct loss
 
         for _second, second in stats.items():
+
             if 'loss' + ext not in second or _second <= _first:
                 continue
             second_diff = syn_loss_diff.setdefault(_second, {})
 
             with torch.no_grad():
-                expected_loss = torch.min(first['loss' + ext], second['loss' + ext])  # expecting min loss
+                first_loss = first['loss' + ext] # expecting min loss
+                second_loss = second['loss' + ext]
 
                 measured_loss = synergy(first, second, target, ext)
 
-                loss_diff_share = torch.clamp(expected_loss - measured_loss, 0) / 2  # record direct loss diff
-                loss_diff_share /= len(responsives)  # average over responsives
-                first['synergy_loss_diff' + ext] += loss_diff_share
-                second['synergy_loss_diff' + ext] += loss_diff_share
+                first_diff_share = torch.clamp((first_loss - measured_loss), 0)/ 2  # record direct loss diff
+                second_diff_share = torch.clamp((second_loss - measured_loss), 0)/ 2  # record direct loss diff
+
+                first_diff_share /= len(responsives)  # average over responsives
+                first['synergy_loss_diff' + ext] += second_diff_share
+                second['synergy_loss_diff' + ext] += first_diff_share
 
                 # pairwise loss reduction of expected to measured loss due to synergy between first and second
-                first_diff[_second] = loss_diff_share
-                second_diff[_first] = loss_diff_share
+                first_diff[_second] = second_diff_share
+                second_diff[_first] = first_diff_share
 
                 measured_params = scaling_law_loss_to_params(measured_loss)
-                expected_params = scaling_law_loss_to_params(expected_loss)
+                first_expected_params = scaling_law_loss_to_params(first_loss)
+                second_expected_params = scaling_law_loss_to_params(second_loss)
 
                 # powered down number of params, e.g. dynamic range 3 → 6 nats for scaling_law_power=0.5
                 pow_measured_params = torch.pow(measured_params, scaling_law_power)
-                pow_expected_params = torch.pow(expected_params, scaling_law_power)
+                first_pow_expected_params = torch.pow(first_expected_params, scaling_law_power)
+                second_pow_expected_params = torch.pow(second_expected_params, scaling_law_power)
 
-                synergy_share = torch.clamp(pow_measured_params - pow_expected_params, 0) / 2
-                synergy_share /= len(responsives)  # average over responsives
-                first['synergy' + ext] += synergy_share  # share synergy amongst coalition members
-                second['synergy' + ext] += synergy_share
+                first_synergy_share = torch.clamp((pow_measured_params - first_pow_expected_params), 0) / 2
+                second_synergy_share = torch.clamp((pow_measured_params - second_pow_expected_params), 0) / 2
+                first_synergy_share /= len(responsives)  # average over responsives
+                second_synergy_share /= len(responsives)  # average over responsives
+                first['synergy' + ext] +=  second_synergy_share # share synergy amongst coalition members
+                second['synergy' + ext] +=  first_synergy_share
 
     return syn_loss_diff
 

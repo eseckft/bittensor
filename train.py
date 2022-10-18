@@ -13,6 +13,8 @@ from tqdm import tqdm
 from torch import nn
 from torch.nn.utils import clip_grad_norm_
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
+from bittensor.utils.tokenizer_utils import phrase_cross_entropy
+
 from rich.traceback import install
 install(show_locals=False)
 
@@ -74,7 +76,7 @@ class Nucleus(nn.Module):
         self.wallet = wallet
         self.graph = graph
         self.sigmoid = torch.nn.Sigmoid()
-        self.synapse = bittensor.TextLastHiddenState()
+        self.synapse = bittensor.TextCausalLMNext()
         self.loss_fct = torch.nn.CrossEntropyLoss()
         self.tokenizer = bittensor.tokenizer()
         self.pad_token = self.tokenizer(self.tokenizer.pad_token)['input_ids'][0]
@@ -101,21 +103,6 @@ class Nucleus(nn.Module):
                 batch_first=True
             ),
             config.nucleus.nlayers
-        )
-        self.decoder = TransformerEncoder( 
-            TransformerEncoderLayer( 
-                bittensor.__network_dim__, 
-                config.nucleus.nhead, 
-                config.nucleus.nhid, 
-                config.nucleus.dropout, 
-                batch_first=True
-            ), 
-            config.nucleus.nlayers 
-        )
-        self.decoder_head = torch.nn.Linear( 
-            bittensor.__network_dim__, 
-            bittensor.__vocab_size__ , 
-            bias=False
         )
     
     @classmethod
@@ -223,11 +210,23 @@ class Nucleus(nn.Module):
                 pass
         return [ r.to(self.config.nucleus.device) for r in results ] 
     
+    def base_params(self, query_response, inputs_nxt):
+        # topk_tensor = unravel_topk_token_phrases(query_response, topk=synapse.topk)  # [batch_size, topk + 1, max_len]
+        _losses_val, _losses = phrase_cross_entropy(inputs_nxt, query_response, reduce=False)
+        _losses_val[_losses_val.isnan()] = 20  # assign large loss
+        _losses[_losses.isnan()] = 20  # assign large loss
+        _loss_val = _losses_val.mean()
+        _loss = _losses.mean()
+        
+        return _loss, _loss_val, _losses
+
     def forward(self, inputs):
         inputs = inputs.to(self.config.nucleus.device)
+        inputs_seq = inputs[..., :-self.config.validation_len]
+        inputs_nxt = inputs[..., -self.config.validation_len:] 
 
         # Route
-        embedding = self.token_embedding(inputs) * math.sqrt(bittensor.__network_dim__)
+        embedding = self.token_embedding(inputs_seq) * math.sqrt(bittensor.__network_dim__)
         src_mask = torch.triu(torch.ones(embedding.size(1), embedding.size(1)) * float('-inf'), diagonal=1).to(self.config.nucleus.device)
         pos_embedding = self.local_pos_encoder(embedding)
         routing_context = self.encoder(pos_embedding, mask=src_mask)
@@ -235,14 +234,17 @@ class Nucleus(nn.Module):
         
         # Query
         uid_sample = random.sample( range(4096), self.config.nucleus.n_queried )
-        responses = self.query( uid_sample, inputs)
+        responses = self.query( uid_sample, inputs_seq)
+
         
+        losses = []
+        for response in responses:
+            loss , _ , base_losses  = self.base_params(response, inputs_nxt)
+            losses += [base_losses]
+
         # Evaluate.
-        weighted_responses = sum([ r  * w for r, w in list(zip( responses, routing_score[uid_sample])) ])
-        logits = self.decoder_head( self.decoder( weighted_responses ))
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = inputs[..., 1:].contiguous()   
-        loss = self.loss_fct( shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1) )
+        weighted_probs = sum([ torch.exp(-r)  * w for r, w in list(zip( losses, routing_score[uid_sample])) ])
+        loss = -torch.log(weighted_probs).mean()
         
         return loss
     
@@ -260,6 +262,7 @@ parser.add_argument( '--n_steps', type=int, default=10, help='''The number of st
 parser.add_argument( '--chunk_size', type=int, default=10, help='''The number of concurrent steps we run.''')
 parser.add_argument( '--learning_rate', type=float, help='Training initial learning rate.', default=0.01)
 parser.add_argument( '--momentum', type=float, help='optimizer momentum.', default=0.8)
+parser.add_argument( '--validation_len', type=int, default=5, help='''validation length of the sequence''')
 
 bittensor.wallet.add_args(parser)
 bittensor.logging.add_args(parser)
@@ -274,8 +277,8 @@ print (config)
 ##########################
 # Sync graph and load power wallet.
 bittensor.logging( config = config )
-dataset = bittensor.dataset( config = config )
 subtensor = bittensor.subtensor( config = config )
+dataset = bittensor.dataset( config = config , num_batches = config.n_steps+1 , block_size=subtensor.validator_sequence_length + config.validation_len)
 graph = bittensor.metagraph( subtensor = subtensor ).sync()
 wallet = bittensor.wallet()
 

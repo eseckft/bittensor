@@ -237,11 +237,11 @@ class Nucleus(nn.Module):
         uid_sample = random.sample( range(4096), self.config.nucleus.n_queried )
         responses = self.query( uid_sample, inputs_seq)
 
-        
-        losses = []
-        for response in responses:
-            loss , _ , base_losses  = self.base_params(response, inputs_nxt)
-            losses += [base_losses]
+        with torch.no_grad():
+            losses = []
+            for response in responses:
+                loss , _ , base_losses  = self.base_params(response, inputs_nxt)
+                losses += [base_losses]
 
         # Evaluate.
         weighted_probs = sum([ torch.exp(-r)  * w for r, w in list(zip( losses, routing_score[uid_sample])) ])
@@ -342,7 +342,8 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=config.max_workers) as ex
         clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         losses = [l.item() for l in chunk_results]
-        avg_loss_history.append( sum( losses )/ config.chunk_size )
+        print(losses)
+        avg_loss_history.append( sum( losses)/ config.chunk_size )
         if config.use_wandb:
             wandb.log({'loss': sum( losses )/ config.chunk_size}, step=ci)
         print ('step:', ci+1, '/', len(step_chunks), '\tavg loss:', avg_loss_history[-1] )

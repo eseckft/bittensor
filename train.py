@@ -15,7 +15,6 @@ from torch.nn.utils import clip_grad_norm_
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
 from bittensor.utils.tokenizer_utils import phrase_cross_entropy
 import wandb
-from pympler import tracker
 
 from rich.traceback import install
 install(show_locals=False)
@@ -325,7 +324,6 @@ avg_loss_history = []
 if config.use_wandb: 
     bittensor.wandb(config= config)
 
-tr = tracker.SummaryTracker()
 with concurrent.futures.ThreadPoolExecutor(max_workers=config.max_workers) as executor:
     step_chunks = list( chunks( list(range(config.n_steps)), config.chunk_size ) )
     for ci, chunk in enumerate( step_chunks ):
@@ -345,12 +343,10 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=config.max_workers) as ex
         clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         losses = [l.item() for l in chunk_results]
-        print(losses)
         avg_loss_history.append( sum( losses)/ config.chunk_size )
         if config.use_wandb:
             wandb.log({'loss': sum( losses )/ config.chunk_size}, step=ci)
         print ('step:', ci+1, '/', len(step_chunks), '\tavg loss:', avg_loss_history[-1] )
-        tr.print_diff()
         
 # Measure state after.
 io_2 = psutil.net_io_counters()

@@ -15,6 +15,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
 from bittensor.utils.tokenizer_utils import phrase_cross_entropy
 import wandb
+from pympler import tracker
 
 from rich.traceback import install
 install(show_locals=False)
@@ -317,7 +318,7 @@ start_bytes_sent, start_bytes_recv = io_1.bytes_sent, io_1.bytes_recv
 def step():
     inputs = dataqueue.get().to(config.nucleus.device)
     loss = model( inputs )
-    loss.backward()
+    
     return loss
 
 avg_loss_history = []
@@ -340,12 +341,15 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=config.max_workers) as ex
             chunk_results.append( future.result() )  
                 
         # Apply step.
+        losses = sum([l for l in chunk_results])
+
+        losses.backward()
         clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
-        losses = [l.item() for l in chunk_results]
-        avg_loss_history.append( sum( losses)/ config.chunk_size )
+        
+        avg_loss_history.append( losses.detach()/ config.chunk_size )
         if config.use_wandb:
-            wandb.log({'loss': sum( losses )/ config.chunk_size}, step=ci)
+            wandb.log({'loss':  losses.detach()/ config.chunk_size}, step=ci)
         print ('step:', ci+1, '/', len(step_chunks), '\tavg loss:', avg_loss_history[-1] )
         
 # Measure state after.

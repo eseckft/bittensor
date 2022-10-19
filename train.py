@@ -14,6 +14,7 @@ from torch import nn
 from torch.nn.utils import clip_grad_norm_
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
 from bittensor.utils.tokenizer_utils import phrase_cross_entropy
+import wandb
 
 from rich.traceback import install
 install(show_locals=False)
@@ -263,6 +264,7 @@ parser.add_argument( '--chunk_size', type=int, default=10, help='''The number of
 parser.add_argument( '--learning_rate', type=float, help='Training initial learning rate.', default=0.01)
 parser.add_argument( '--momentum', type=float, help='optimizer momentum.', default=0.8)
 parser.add_argument( '--validation_len', type=int, default=5, help='''validation length of the sequence''')
+parser.add_argument( '--use_wandb', action='store_true', default=False, help='''To use wandb to track results''')
 
 bittensor.wallet.add_args(parser)
 bittensor.logging.add_args(parser)
@@ -317,6 +319,9 @@ def step():
     return loss
 
 avg_loss_history = []
+if config.use_wandb: 
+    bittensor.wandb(config= config)
+
 with concurrent.futures.ThreadPoolExecutor(max_workers=config.max_workers) as executor:
     step_chunks = list( chunks( list(range(config.n_steps)), config.chunk_size ) )
     for ci, chunk in enumerate( step_chunks ):
@@ -337,7 +342,8 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=config.max_workers) as ex
         optimizer.step()
         losses = [l.item() for l in chunk_results]
         avg_loss_history.append( sum( losses )/ config.chunk_size )
-        
+        if config.use_wandb:
+            wandb.log({'loss': sum( losses )/ config.chunk_size}, step=ci)
         print ('step:', ci+1, '/', len(step_chunks), '\tavg loss:', avg_loss_history[-1] )
 
         

@@ -15,7 +15,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
 from bittensor.utils.tokenizer_utils import phrase_cross_entropy
 import wandb
-from pympler import tracker
+from pympler import summary, muppy
 
 from rich.traceback import install
 install(show_locals=False)
@@ -145,19 +145,6 @@ class Nucleus(nn.Module):
                 )
               )
             )
-            bittensor.logging.rpc_log ( 
-                axon = False, 
-                forward = True, 
-                is_response = False, 
-                code = bittensor.proto.ReturnCode.Success, 
-                call_time = 0, 
-                pubkey = self.receptors[uid].endpoint.hotkey, 
-                uid = self.receptors[uid].endpoint.uid, 
-                inputs = list(inputs.shape), 
-                outputs = None, 
-                message = 'Success',
-                synapse = self.synapse.synapse_type
-            )
         time.sleep( self.config.nucleus.timeout )
         for i,f in enumerate( futures ):
             try:
@@ -166,50 +153,11 @@ class Nucleus(nn.Module):
                     if fresult.return_code == 1:
                         response_tensor = self.synapse.deserialize_forward_response_proto ( inputs, fresult.tensors[0] )
                         results[index] = response_tensor
-                        bittensor.logging.rpc_log ( 
-                            axon = False, 
-                            forward = True, 
-                            is_response = True, 
-                            code = bittensor.proto.ReturnCode.Success, 
-                            call_time = self.config.nucleus.timeout, 
-                            pubkey = self.receptors[uid].endpoint.hotkey, 
-                            uid = self.receptors[uid].endpoint.uid, 
-                            inputs = list(inputs.shape), 
-                            outputs = list(response_tensor.shape), 
-                            message = 'Success',
-                            synapse = self.synapse.synapse_type
-                        )
-                else:
-                    # Timeout Logging.
-                    bittensor.logging.rpc_log ( 
-                        axon = False, 
-                        forward = True, 
-                        is_response = True, 
-                        code = bittensor.proto.ReturnCode.Timeout, 
-                        call_time = self.config.nucleus.timeout, 
-                        pubkey = self.receptors[uid].endpoint.hotkey, 
-                        uid = self.receptors[uid].endpoint.uid, 
-                        inputs = list(inputs.shape), 
-                        outputs = None, 
-                        message = 'Timeout',
-                        synapse = self.synapse.synapse_type
-                    )
+
             except Exception as e:
                 # Unknown error logging.
-                bittensor.logging.rpc_log ( 
-                    axon = False, 
-                    forward = True, 
-                    is_response = True, 
-                    code = bittensor.proto.ReturnCode.UnknownException, 
-                    call_time = self.config.nucleus.timeout, 
-                    pubkey = self.receptors[uid].endpoint.hotkey, 
-                    uid = self.receptors[uid].endpoint.uid, 
-                    inputs = list(inputs.shape), 
-                    outputs = None, 
-                    message = str(e),
-                    synapse = self.synapse.synapse_type
-                )   
                 pass
+
         return [ r.to(self.config.nucleus.device) for r in results ] 
     
     def base_params(self, query_response, inputs_nxt):
@@ -222,7 +170,7 @@ class Nucleus(nn.Module):
         
         return _loss, _loss_val, _losses
 
-    def forward(self, inputs):
+    def forward(self, inputs, dendrite):
         inputs = inputs.to(self.config.nucleus.device)
         inputs_seq = inputs[..., :-self.config.validation_len]
         inputs_nxt = inputs[..., -self.config.validation_len:] 
@@ -236,13 +184,19 @@ class Nucleus(nn.Module):
         
         # Query
         uid_sample = random.sample( range(4096), self.config.nucleus.n_queried )
+        random_endpoints = [graph.endpoints[uid] for uid in uid_sample]
         with torch.no_grad():
-            responses = self.query( uid_sample, inputs_seq)
-
+            #responses = self.query( uid_sample, inputs_seq)
+            responses, return_ops, times = dendrite.text(
+                endpoints=random_endpoints,
+                inputs=inputs_seq,
+                synapses=[self.synapse],
+                timeout=self.config.nucleus.timeout
+            )
         with torch.no_grad():
             losses = []
             for response in responses:
-                loss , _ , base_losses  = self.base_params(response, inputs_nxt)
+                loss , _ , base_losses  = self.base_params(response[0], inputs_nxt)
                 losses += [base_losses]
 
         # Evaluate.
@@ -273,6 +227,7 @@ bittensor.logging.add_args(parser)
 bittensor.subtensor.add_args(parser)
 bittensor.dataset.add_args(parser)
 bittensor.wandb.add_args(parser)
+bittensor.dendrite.add_args(parser)
 Nucleus.add_args(parser)
 config = bittensor.config(parser = parser)
 print (config)
@@ -286,7 +241,7 @@ subtensor = bittensor.subtensor( config = config )
 dataset = bittensor.dataset( config = config , num_batches = config.n_steps+1 , block_size=subtensor.validator_sequence_length + config.validation_len)
 graph = bittensor.metagraph( subtensor = subtensor ).sync()
 wallet = bittensor.wallet()
-
+dendrite = bittensor.dendrite ( config = config, wallet = wallet)
 
 ##########################
 ##### Setup Model ######
@@ -317,13 +272,14 @@ start_bytes_sent, start_bytes_recv = io_1.bytes_sent, io_1.bytes_recv
 
 def step():
     inputs = dataqueue.get().to(config.nucleus.device)
-    loss = model( inputs )
+    loss = model( inputs , dendrite)
     
     return loss
 
 avg_loss_history = []
 if config.use_wandb: 
     bittensor.wandb(config= config)
+
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=config.max_workers) as executor:
     step_chunks = list( chunks( list(range(config.n_steps)), config.chunk_size ) )
@@ -351,7 +307,8 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=config.max_workers) as ex
         if config.use_wandb:
             wandb.log({'loss':  losses.detach()/ config.chunk_size}, step=ci)
         print ('step:', ci+1, '/', len(step_chunks), '\tavg loss:', avg_loss_history[-1] )
-        
+
+
 # Measure state after.
 io_2 = psutil.net_io_counters()
 total_bytes_sent, total_bytes_recved = io_2.bytes_sent - start_bytes_sent, io_2.bytes_recv - start_bytes_recv

@@ -67,6 +67,42 @@ class Receptor(nn.Module):
         self.receptor_uid = str(uuid.uuid1())
         self.semaphore = threading.Semaphore(max_processes)
         self.state_dict = _common.CYGRPC_CONNECTIVITY_STATE_TO_CHANNEL_CONNECTIVITY
+        self.stats = SimpleNamespace(
+            forward_qps = stat_utils.timed_rolling_avg(0.0, 0.01),
+            backward_qps = stat_utils.timed_rolling_avg(0.0, 0.01),
+            forward_elapsed_time = stat_utils.timed_rolling_avg(0.0, 0.01),
+            forward_bytes_out = stat_utils.timed_rolling_avg(0.0, 0.01),
+            forward_bytes_in = stat_utils.timed_rolling_avg(0.0, 0.01),
+            backward_bytes_out = stat_utils.timed_rolling_avg(0.0, 0.01),
+            backward_bytes_in = stat_utils.timed_rolling_avg(0.0, 0.01),
+            codes = {
+                bittensor.proto.ReturnCode.NoReturn: 0,
+                bittensor.proto.ReturnCode.Success: 0,
+                bittensor.proto.ReturnCode.Timeout: 0,
+                bittensor.proto.ReturnCode.Backoff: 0,
+                bittensor.proto.ReturnCode.Unavailable: 0,
+                bittensor.proto.ReturnCode.NotImplemented: 0,
+                bittensor.proto.ReturnCode.EmptyRequest: 0,
+                bittensor.proto.ReturnCode.EmptyResponse: 0,
+                bittensor.proto.ReturnCode.InvalidResponse: 0,
+                bittensor.proto.ReturnCode.InvalidRequest: 0,
+                bittensor.proto.ReturnCode.RequestShapeException: 0,
+                bittensor.proto.ReturnCode.ResponseShapeException: 0,
+                bittensor.proto.ReturnCode.RequestSerializationException: 0,
+                bittensor.proto.ReturnCode.ResponseSerializationException: 0,
+                bittensor.proto.ReturnCode.RequestDeserializationException: 0,
+                bittensor.proto.ReturnCode.ResponseDeserializationException: 0,
+                bittensor.proto.ReturnCode.NotServingNucleus: 0,
+                bittensor.proto.ReturnCode.NucleusTimeout: 0,
+                bittensor.proto.ReturnCode.NucleusFull: 0,
+                bittensor.proto.ReturnCode.RequestIncompatibleVersion: 0,
+                bittensor.proto.ReturnCode.ResponseIncompatibleVersion: 0,
+                bittensor.proto.ReturnCode.SenderUnknown: 0,
+                bittensor.proto.ReturnCode.UnknownException: 0,
+                bittensor.proto.ReturnCode.Unauthenticated: 0,
+                bittensor.proto.ReturnCode.BadEndpoint: 0,
+            }
+        )
 
     def __str__ ( self ):
         return "Receptor({})".format(self.endpoint) 
@@ -174,6 +210,7 @@ class Receptor(nn.Module):
         # ==============================================================
         def finalize_stats_and_logs():
             for index, synapse in enumerate( synapses ):
+                self.stats.codes[ synapse_codes[ index ] ] += 1
                 bittensor.logging.rpc_log ( 
                     axon = False, 
                     forward = False, 
@@ -252,6 +289,8 @@ class Receptor(nn.Module):
         # ==== Make RPC Call ====
         # =======================
         try:
+            self.stats.backward_qps.update(1)
+            self.stats.backward_bytes_out.update(sys.getsizeof(grpc_request))
             # Fire and forget.
             self.stub.Backward(
                 request = grpc_request, 
@@ -370,7 +409,9 @@ class Receptor(nn.Module):
         # ==== Function which prints all log statements per synapse ====
         # ==============================================================
         def finalize_stats_and_logs():
+            self.stats.forward_elapsed_time.update( clock.time() - start_time )
             for index, synapse in enumerate( synapses ):
+                self.stats.codes[ synapse_codes[ index ] ] += 1
                 bittensor.logging.rpc_log ( 
                     axon = False, 
                     forward = True, 
@@ -458,6 +499,8 @@ class Receptor(nn.Module):
         # =======================
         grpc_response = None
         try:
+            self.stats.forward_qps.update(1)
+            self.stats.forward_bytes_out.update( sys.getsizeof( grpc_request ) )
             finalize_stats_and_logs()
             grpc_response = self.stub.Forward (
                 request = grpc_request, 
@@ -468,6 +511,7 @@ class Receptor(nn.Module):
                     ('bittensor-version',str(bittensor.__version_as_int__)),
                     ('request_type', str(bittensor.proto.RequestType.FORWARD)),
                 ))
+            self.stats.forward_bytes_in.update( grpc_response.ByteSize() )
             synapse_is_response = [ True for _ in synapses ]
             # Set successful response booleans to true
 

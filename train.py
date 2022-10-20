@@ -199,10 +199,10 @@ class Nucleus(nn.Module):
                 loss , _ , base_losses  = self.base_params(response[0], inputs_nxt)
                 losses += [base_losses]
 
+        norm_routing_score =  routing_score[uid_sample] /  routing_score[uid_sample].sum()
         # Evaluate.
-        weighted_probs = sum([ torch.exp(-r)  * w for r, w in list(zip( losses, routing_score[uid_sample])) ])
+        weighted_probs = sum([ torch.exp(-r)  * w for r, w in list(zip( losses, norm_routing_score)) ])
         loss = -torch.log(weighted_probs).mean()
-        
         return loss
     
     
@@ -281,32 +281,32 @@ if config.use_wandb:
     bittensor.wandb(config= config)
 
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=config.max_workers) as executor:
-    step_chunks = list( chunks( list(range(config.n_steps)), config.chunk_size ) )
-    for ci, chunk in enumerate( step_chunks ):
-        # Clear grads.
-        optimizer.zero_grad() 
+threadpool = concurrent.futures.ThreadPoolExecutor( max_workers = config.max_workers )
+step_chunks = list( chunks( list(range(config.n_steps)), config.chunk_size ) )
+for ci, chunk in enumerate( step_chunks ):
+    # Clear grads.
+    optimizer.zero_grad() 
+    
+    # Fire batches.
+    chunk_futures = []
+    chunk_results = []
+    for i in chunk:
+        chunk_futures.append(threadpool.submit(step))
         
-        # Fire batches.
-        chunk_futures = []
-        chunk_results = []
-        for i in chunk:
-            chunk_futures.append(executor.submit(step))
+    for future in concurrent.futures.as_completed(chunk_futures):
+        chunk_results.append( future.result() )  
             
-        for future in concurrent.futures.as_completed(chunk_futures):
-            chunk_results.append( future.result() )  
-                
-        # Apply step.
-        losses = sum([l for l in chunk_results])
+    # Apply step.
+    losses = sum([l for l in chunk_results])
 
-        losses.backward()
-        clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        
-        avg_loss_history.append( losses.detach()/ config.chunk_size )
-        if config.use_wandb:
-            wandb.log({'loss':  losses.detach()/ config.chunk_size}, step=ci)
-        print ('step:', ci+1, '/', len(step_chunks), '\tavg loss:', avg_loss_history[-1] )
+    losses.backward()
+    clip_grad_norm_(model.parameters(), 1.0)
+    optimizer.step()
+    
+    avg_loss_history.append( losses.detach()/ config.chunk_size )
+    if config.use_wandb:
+        wandb.log({'loss':  losses.detach()/ config.chunk_size}, step=ci)
+    print ('step:', ci+1, '/', len(step_chunks), '\tavg loss:', avg_loss_history[-1] )
 
 
 # Measure state after.

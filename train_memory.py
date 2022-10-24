@@ -211,7 +211,8 @@ class Nucleus(nn.Module):
         pos_embedding = self.local_pos_encoder(embedding)
         routing_context = self.encoder(pos_embedding, mask=src_mask)
         routing_score = torch.mean(self.sigmoid(self.gates(routing_context[:, -1, :])), dim=0)
-        
+        routing_score = routing_score + torch.rand(self.graph.n) * torch.std(routing_score)
+
         # Query
         topk_routing_scores, topk_routing_indices = routing_score.topk( self.config.nucleus.n_queried )
         random_endpoints = [graph.endpoints[uid] for uid in topk_routing_indices]

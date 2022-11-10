@@ -47,7 +47,7 @@ class dataset:
             max_datasets: int = None,
             save_dataset: bool = False,
             sequence_length: int = 128,
-            load_dataset: bool = False,
+            load_dataset: bool = True,
             no_tokenizer: bool = None,
             num_batches: int = None,
             run_generator: bool = False,
